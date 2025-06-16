@@ -197,8 +197,13 @@ void APP_Initialize ( void );
  */
 
 void APP_Tasks( void );
-void writeRegister16(uint8_t reg, uint16_t value);
-int16_t readRegister16(uint8_t reg);
+void ina237_writeRegister16(uint8_t reg, uint16_t value);
+int16_t ina237_readRegister16(uint8_t reg);
+void initINA237();
+float ina237_read_temperature();
+float ina237_read_voltage();
+float ina237_read_current();
+float ina237_read_power();
 
 #endif /* _APP_H */
 
