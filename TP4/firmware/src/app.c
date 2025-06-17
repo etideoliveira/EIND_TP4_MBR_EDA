@@ -1,3 +1,13 @@
+//-----------------------------------------------------------------------------------//
+// Nom du projet 		: TP4_DCDC_uC
+// Nom du fichier 		: 
+// Date de création 	: 17.06.2025
+// Date de modification : 
+//
+// Auteur 				: Etienne De Oliveira & Mathieu Bucher
+//
+// Description          : fichier source TP4
+//----------------------------------------------------------------------------------//
 /*******************************************************************************
   MPLAB Harmony Application Source File
   
@@ -62,12 +72,18 @@ SUBSTITUTE GOODS, TECHNOLOGY, SERVICES, OR ANY CLAIMS BY THIRD PARTIES
 // *****************************************************************************
 #define INA237_ADDR 0x40  // Adresse I2C du capteur
 
-// Registres de l?INA237
+// Registres de l'INA237
 #define REG_CONFIG     0x00
 #define REG_SHUNT_CAL  0x02
 #define REG_VBUS       0x05
 #define REG_CURRENT    0x07
 #define REG_POWER      0x08
+
+#define COURANT_MAX 2.5
+#define TIME_OVERCURRENT_WAIT 0xC350
+#define MAX_OVERSHOOT 100
+#define MIN_OVERSHOOT 0
+#define VAL_PWM_MAX 959
 
 // *****************************************************************************
 /* Application Data
@@ -119,6 +135,30 @@ APP_DATA appData;
   Remarks:
     See prototype in app.h.
  */
+float tension = 0;
+float courant = 0;
+
+//-valeur consigne--//
+float consigne = 5;
+
+//-Valeurs pour le correcteur
+float Kp = 0.03; //Règle le dépassement
+float Ki = 0.001; //Règle la vitesse pour atteindre la consigne
+
+//-- variable liée aux différents correcteur PID --// 
+float Up_k = 0; // facteur proportionnelle; 
+float Ui_k = 0; // facteur intégrateur => actuel 
+float Ui_k_1 = 0; // facteur intégrateur => passé 
+float Uk; // facteur globale
+
+//-- variables pour représenter l'erreur entre la consigne et la position  
+float erreurk; // représentant l'erreur actuel entre la position et la consigne 
+
+//variable d'attente si le courant est trop élevé 
+uint8_t overCurent = 0;
+uint32_t wait_AfteroverCurent = 0;
+//--variable modification du pwm--//
+uint32_t value_PWM = 0;
 
 void APP_Initialize(void) {
     /* Place the App state machine in its initial state. */
@@ -145,32 +185,81 @@ void APP_Tasks(void) {
             /* Application's initial state. */
         case APP_STATE_INIT:
         {
-            bool appInitialized = true;
             DRV_TMR0_Start();
             DRV_TMR1_Start();
             DRV_OC0_Start();
             initINA237();
+            // Activation du pin Enable du driver de gate
             SDOn();
-
-            if (appInitialized) {
-
-                appData.state = APP_STATE_SERVICE_TASKS;
-            }
+            UpdateAppState(APP_STATE_WAIT);
             break;
         }
 
         case APP_STATE_SERVICE_TASKS:
         {
-            Led_EtatToggle();
-            //            ina237_readRegister16(0x3E);
-            //            float temp = ina237_read_temperature();
-            //printf("Température INA237 : %.1f °C\n", temp);
+            //Led_EtatToggle();
+            //            ina237_readRegister16(0x3E); //Read Chip ID "TI" in ASCII
+            //            ina237_read_temperature();
             //            ina237_read_voltage();
             //            ina237_read_current();
-            ina237_read_power();
+            //            ina237_read_power();
+
+
+            // Lecture des valeurs du courant
+            courant = ina237_read_current();
+
+            // Vérification overcurrent
+            if (courant > COURANT_MAX) {
+                overCurent = 1;
+            }
+
+            if (overCurent == 0) {
+                tension = ina237_read_voltage();
+                // Calcul erreur 
+                erreurk = consigne - tension;
+
+                //-- Proportionnel --//
+                Up_k = Kp * erreurk;
+
+                //-- Intégrateur --// 
+                Ui_k = Ki * erreurk + Ui_k_1;
+
+                // Pour limiter l'overshoot
+                if (Ui_k > MAX_OVERSHOOT)
+                    Ui_k = MAX_OVERSHOOT;
+
+                if (Ui_k < MIN_OVERSHOOT)
+                    Ui_k = MIN_OVERSHOOT;
+
+                //Calcul de Uk
+                Uk = Up_k + Ui_k;
+
+                // Calcul puis changement du pwm 
+                value_PWM = Uk * VAL_PWM_MAX;
+                // Envoi de la valeur calculée sur l'OC
+                DRV_OC0_PulseWidthSet(value_PWM);
+                // Mémoire de Ui_k
+                Ui_k_1 = Ui_k;
+
+            } else {
+                DRV_OC0_PulseWidthSet(0);
+                // Gestion du temps d'attente overcurrent
+                if (wait_AfteroverCurent < TIME_OVERCURRENT_WAIT) {
+                    wait_AfteroverCurent++;
+                } else {
+                    wait_AfteroverCurent = 0;
+                    overCurent = 0;
+                }
+            }
+
+            UpdateAppState(APP_STATE_WAIT);
             break;
         }
-
+        case APP_STATE_WAIT:
+        {
+            //état attente rien ne se passe --> attend intéruption OC pour continuer
+            break;
+        }
             /* TODO: implement your application state machine.*/
 
 
@@ -183,6 +272,9 @@ void APP_Tasks(void) {
     }
 }
 
+void UpdateAppState(APP_STATES newState) {
+    appData.state = newState;
+}
 // Initialisation I2C + INA237
 
 void initINA237() {
@@ -192,7 +284,7 @@ void initINA237() {
     // 0b 1xxx xxxx xxxx 0111 ? 0x8...7
     uint16_t config = 0x8FF7; // Conversion times min, ADCRANGE=1, continuous mode
 
-    // Current_LSB = 0.1429 A ? SHUNT_CAL = 131072 / (0.1429 * 0.014) ? 65535
+    // SHUNT_CAL = 819.2*10^6 *(3/2^15) * 0.014 = 1050
     uint16_t shuntCal = 1050;
 
     ina237_writeRegister16(REG_CONFIG, config);
@@ -261,7 +353,7 @@ float ina237_read_power() {
     i2c_stop();
 
     // Assemblage :
-    uint32_t raw_power  = ((uint32_t) msb << 16) | ((uint16_t) mid << 8) | lsb;
+    uint32_t raw_power = ((uint32_t) msb << 16) | ((uint16_t) mid << 8) | lsb;
     // Si bit 23 (signe) est à 1 ? signe négatif ? étendre à 32 bits
     if (raw_power & 0x800000) {
         raw_power |= 0xFF000000;
@@ -270,6 +362,7 @@ float ina237_read_power() {
 
     // Calcul final
     float power_watts = 0.2f * 0.000091553f * (float) signed_power;
+    return power_watts;
 }
 /*******************************************************************************
  End of File
